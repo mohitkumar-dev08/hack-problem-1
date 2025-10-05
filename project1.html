@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ResumeRAG — Single File UI</title>
+  <style>
+    /* Simple clean UI */
+    :root{--bg:#0f1724;--card:#0b1220;--muted:#9aa4b2;--accent:#6ee7b7;--danger:#ff6b6b}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    body{background:linear-gradient(180deg,#071022 0%, #071428 100%);color:#e6eef6}
+    .container{max-width:1100px;margin:28px auto;padding:20px}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+    .brand{display:flex;gap:12px;align-items:center}
+    .logo{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#60a5fa);display:flex;align-items:center;justify-content:center;font-weight:700;color:#04263b}
+    nav a{color:var(--muted);margin-left:14px;text-decoration:none}
+    nav a.active{color:var(--accent);font-weight:600}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:18px;border-radius:12px;box-shadow:0 6px 30px rgba(2,6,23,0.7)}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:18px}
+    input,textarea,select,button{font-family:inherit}
+    label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+    input[type=text],input[type=file],textarea,select{width:100%;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+    button{padding:10px 12px;border-radius:8px;border:0;background:var(--accent);color:#04263b;font-weight:600;cursor:pointer}
+    .muted{color:var(--muted);font-size:13px}
+    .list{margin-top:12px}
+    .item{padding:10px;border-radius:8px;background:rgba(255,255,255,0.01);margin-bottom:8px}
+    .small{font-size:13px;color:var(--muted)}
+    .danger{background:linear-gradient(180deg,#3b0d0d,#2b0606);color:#ffecec}
+    pre{white-space:pre-wrap;background:#071222;padding:10px;border-radius:8px}
+    .footer{margin-top:18px;color:var(--muted);font-size:13px}
+    .token-box{display:flex;gap:8px;align-items:center}
+    .pill{background:rgba(255,255,255,0.03);padding:6px 8px;border-radius:999px;font-size:13px}
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="brand">
+      <div class="logo">RR</div>
+      <div>
+        <div style="font-weight:700">ResumeRAG — Judge UI</div>
+        <div class="small" style="margin-top:2px">Single-file HTML to exercise the judge APIs</div>
+      </div>
+    </div>
+    <nav>
+      <a href="#/upload" id="nav-upload">Upload</a>
+      <a href="#/search" id="nav-search">Search</a>
+      <a href="#/jobs" id="nav-jobs">Jobs</a>
+      <a href="#/candidates" id="nav-candidates">Candidates</a>
+    </nav>
+  </header>
+
+  <main id="app" class="card">
+    <!-- SPA content injected here -->
+  </main>
+
+  <div class="footer">Test credentials: <strong>admin@mail.com</strong> / <strong>admin123</strong> (role: recruiter). Backend assumed at <code>http://localhost:3000</code></div>
+</div>
+
+<script>
+/* ---------------------------------------------
+   Simple Single-File SPA for ResumeRAG Judge
+   - Supports login/register
+   - Pages: /upload, /search, /jobs, /candidates/:id
+   - Uses fetch to talk to backend (localhost:3000)
+   - Adds Idempotency-Key for create requests
+   ---------------------------------------------*/
+
+const API_BASE = localStorage.getItem('RAG_API') || 'http://localhost:3000';
+const app = document.getElementById('app');
+let state = { token: localStorage.getItem('RAG_TOKEN') || null };
+
+function saveToken(t){ state.token = t; if(t) localStorage.setItem('RAG_TOKEN',t); else localStorage.removeItem('RAG_TOKEN'); }
+function authHeaders(){ return state.token ? { 'Authorization': 'Bearer '+state.token } : {}; }
+
+function fmtDate(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleString(); }catch(e){return''} }
+
+function navHighlight(route){ document.querySelectorAll('nav a').forEach(a=>a.classList.remove('active')); const el = document.querySelector('[href="#'+route+'"]'); if(el) el.classList.add('active'); }
+
+function render(){
+  const hash = location.hash || '#/upload';
+  if(hash.startsWith('#/upload')) return renderUpload();
+  if(hash.startsWith('#/search')) return renderSearch();
+  if(hash.startsWith('#/jobs')) return renderJobs();
+  if(hash.startsWith('#/candidate/')) return renderCandidate(hash.split('/')[2]);
+  if(hash.startsWith('#/candidates')) return renderCandidates();
+  renderUpload();
+}
+
+/* ----------------- Auth UI ------------------ */
+function authPanel(){
+  const div = document.createElement('div');
+  div.style.display='flex';div.style.gap='12px';div.style.alignItems='center';
+  if(state.token){
+    const t = document.createElement('div'); t.className='pill'; t.textContent='Logged in';
+    const btn = document.createElement('button'); btn.textContent='Logout'; btn.onclick=()=>{ saveToken(null); render(); };
+    div.appendChild(t); div.appendChild(btn);
+  }else{
+    const login = document.createElement('button'); login.textContent='Login'; login.onclick=()=>showLogin();
+    const reg = document.createElement('button'); reg.textContent='Register'; reg.onclick=()=>showRegister();
+    div.appendChild(login); div.appendChild(reg);
+  }
+  return div;
+}
+
+async function showLogin(){
+  const modal = makeModal('Login', (close)=>{
+    const form = document.createElement('form'); form.onsubmit = async (e)=>{
+      e.preventDefault();
+      const email = form.email.value, password = form.password.value;
+      try{
+        const r = await fetch(API_BASE+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+        const j = await r.json();
+        if(r.ok){ saveToken(j.token); close(); render(); } else { alert(JSON.stringify(j)); }
+      }catch(e){ alert('Network error: '+e.message); }
+    };
+    form.innerHTML = `
+      <label>Email<input name="email" type="text" required></label>
+      <label>Password<input name="password" type="password" required></label>
+      <div style="margin-top:10px"><button type="submit">Login</button></div>
+    `;
+    return form;
+  });
+  document.body.appendChild(modal);
+}
+
+async function showRegister(){
+  const modal = makeModal('Register', (close)=>{
+    const form = document.createElement('form'); form.onsubmit = async (e)=>{
+      e.preventDefault();
+      const name = form.name.value, email = form.email.value, password = form.password.value;
+      try{
+        const r = await fetch(API_BASE+'/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,email,password})});
+        const j = await r.json();
+        if(r.ok){ saveToken(j.token); close(); render(); } else { alert(JSON.stringify(j)); }
+      }catch(e){ alert('Network error: '+e.message); }
+    };
+    form.innerHTML = `
+      <label>Name<input name="name" type="text" required></label>
+      <label>Email<input name="email" type="text" required></label>
+      <label>Password<input name="password" type="password" required></label>
+      <div style="margin-top:10px"><button type="submit">Register</button></div>
+    `;
+    return form;
+  });
+  document.body.appendChild(modal);
+}
+
+function makeModal(title, renderBody){
+  const overlay = document.createElement('div');
+  overlay.style.position='fixed';overlay.style.left=0;overlay.style.top=0;overlay.style.right=0;overlay.style.bottom=0;overlay.style.background='rgba(1,6,14,0.6)';overlay.style.display='flex';overlay.style.alignItems='center';overlay.style.justifyContent='center';
+  const box = document.createElement('div'); box.className='card'; box.style.width='420px';
+  const h = document.createElement('div'); h.style.display='flex';h.style.justifyContent='space-between';h.style.alignItems='center'; h.innerHTML = `<strong>${title}</strong>`;
+  const closeBtn = document.createElement('button'); closeBtn.textContent='X'; closeBtn.onclick=()=>overlay.remove(); h.appendChild(closeBtn);
+  box.appendChild(h);
+  const body = renderBody(()=>overlay.remove());
+  if(body instanceof HTMLElement) box.appendChild(body); else box.appendChild(body);
+  overlay.appendChild(box);
+  return overlay;
+}
+
+/* ----------------- Upload Page ------------------ */
+function renderUpload(){
+  navHighlight('/upload');
+  app.innerHTML = '';
+  const grid = document.createElement('div'); grid.className='grid';
+  const left = document.createElement('div'); left.className='card';
+  const right = document.createElement('div'); right.className='card';
+
+  // Left: upload form
+  const auth = authPanel(); left.appendChild(auth);
+  left.appendChild(document.createElement('hr'));
+  const h = document.createElement('h3'); h.textContent='Upload Resume (single file or ZIP)'; left.appendChild(h);
+  const form = document.createElement('form'); form.enctype='multipart/form-data';
+  form.innerHTML = `
+    <label>File<input name="file" type="file" required></label>
+    <label>Owner ID (optional)<input name="owner_id" type="text" placeholder="user id"></label>
+    <label>Idempotency Key (optional)<input name="idemp" type="text" placeholder="leave blank to auto-generate"></label>
+    <div style="margin-top:10px"><button type="submit">Upload</button></div>
+    <div class="small muted" style="margin-top:8px">ZIP files are supported for bulk uploads (server-side unzip).</div>
+  `;
+  form.onsubmit = async (e)=>{
+    e.preventDefault();
+    const file = form.file.files[0]; if(!file) return alert('Pick a file');
+    const fd = new FormData(); fd.append('file', file);
+    const idemp = form.idemp.value || ('idemp-' + Math.random().toString(36).slice(2));
+    try{
+      const headers = Object.assign({}, authHeaders());
+      headers['Idempotency-Key'] = idemp;
+      const res = await fetch(API_BASE+'/api/resumes', { method:'POST', body:fd, headers });
+      const j = await res.json();
+      if(res.ok){ alert('Uploaded: ' + JSON.stringify(j)); } else { alert('Error: '+JSON.stringify(j)); }
+    }catch(err){ alert('Network: '+err.message); }
+  };
+  left.appendChild(form);
+
+  // Right: quick actions + logs
+  const ph = document.createElement('h4'); ph.textContent='Quick Actions'; right.appendChild(ph);
+  const list = document.createElement('div'); list.className='list';
+  const btnSeed = document.createElement('button'); btnSeed.textContent='Seed Example Job & Resumes (calls backend seeds if available)'; btnSeed.onclick=async ()=>{
+    try{
+      const headers = Object.assign({'Content-Type':'application/json'}, authHeaders());
+      const r = await fetch(API_BASE+'/api/jobs',{method:'POST',headers:Object.assign(headers,{'Idempotency-Key':'seed-job'}),body:JSON.stringify({title:'Data Analyst',description:'Analyze data',requirements:['python','sql']})});
+      const j = await r.json(); alert(JSON.stringify(j));
+    }catch(e){ alert('Error: '+e.message); }
+  };
+  list.appendChild(btnSeed);
+
+  const chk = document.createElement('div'); chk.className='small muted'; chk.style.marginTop='12px'; chk.textContent='Note: Make sure backend CORS allows this origin.';
+  right.appendChild(list); right.appendChild(chk);
+
+  grid.appendChild(left); grid.appendChild(right);
+  app.appendChild(grid);
+}
+
+/* ----------------- Search Page ------------------ */
+function renderSearch(){
+  navHighlight('/search');
+  app.innerHTML='';
+  const h = document.createElement('h3'); h.textContent='Search Resumes / Ask Questions'; app.appendChild(h);
+  const auth = authPanel(); app.appendChild(auth);
+  app.appendChild(document.createElement('hr'));
+
+  const form = document.createElement('form'); form.style.display='flex'; form.style.gap='8px';
+  const inp = document.createElement('input'); inp.type='text'; inp.placeholder='Enter query...'; inp.style.flex='1'; inp.name='q';
+  const k = document.createElement('input'); k.type='number'; k.min=1; k.max=20; k.value=5; k.style.width='80px'; k.name='k';
+  const btn = document.createElement('button'); btn.textContent='Ask';
+  form.appendChild(inp); form.appendChild(k); form.appendChild(btn);
+  app.appendChild(form);
+
+  const out = document.createElement('div'); out.style.marginTop='12px'; app.appendChild(out);
+
+  form.onsubmit = async (e)=>{
+    e.preventDefault(); out.innerHTML='';
+    const query = inp.value.trim(); const kval = parseInt(k.value)||5;
+    if(!query) return alert('Write a query');
+    try{
+      const headers = Object.assign({'Content-Type':'application/json'}, authHeaders());
+      const r = await fetch(API_BASE+'/api/ask',{method:'POST',headers,body:JSON.stringify({query,k:kval})});
+      const j = await r.json();
+      if(!r.ok){ out.textContent = JSON.stringify(j); return; }
+      // show answers
+      for(const ans of j.answers || []){
+        const card = document.createElement('div'); card.className='item';
+        card.innerHTML = `<div style="font-weight:700">${escapeHtml(ans.text)}</div><div class="small">score: ${ans.score}</div>`;
+        if(ans.evidence){ const ev = document.createElement('div'); ev.className='small'; ev.style.marginTop='8px'; ev.innerHTML = '<strong>Evidence:</strong>' + ans.evidence.map(e=>`<div>• <a href="#/candidate/${e.resume_id}">${e.resume_id}</a>: ...${escapeHtml(e.snippet.substring(0,180))}</div>`).join(''); card.appendChild(ev); }
+        out.appendChild(card);
+      }
+    }catch(err){ out.textContent = 'Network: '+err.message; }
+  };
+}
+
+/* ----------------- Jobs Page ------------------ */
+async function renderJobs(){
+  navHighlight('/jobs'); app.innerHTML='';
+  const h = document.createElement('h3'); h.textContent='Jobs'; app.appendChild(h);
+  const auth = authPanel(); app.appendChild(auth);
+  app.appendChild(document.createElement('hr'));
+
+  // create job form
+  const form = document.createElement('form'); form.style.marginBottom='12px';
+  form.innerHTML = `
+    <label>Title<input name="title" type="text" required></label>
+    <label>Description<textarea name="description"></textarea></label>
+    <label>Requirements (comma separated)<input name="reqs" type="text"></label>
+    <div style="margin-top:8px"><button type="submit">Create Job</button></div>
+  `;
+  form.onsubmit = async (e)=>{
+    e.preventDefault();
+    const title = form.title.value, description = form.description.value, reqs = form.reqs.value.split(',').map(s=>s.trim()).filter(Boolean);
+    try{
+      const headers = Object.assign({'Content-Type':'application/json'}, authHeaders());
+      headers['Idempotency-Key'] = 'job-'+Math.random().toString(36).slice(2);
+      const r = await fetch(API_BASE+'/api/jobs',{method:'POST',headers,body:JSON.stringify({title,description,requirements:reqs})});
+      const j = await r.json(); if(r.ok){ alert('Job created: '+JSON.stringify(j)); renderJobs(); } else alert(JSON.stringify(j));
+    }catch(e){ alert('Network: '+e.message); }
+  };
+  app.appendChild(form);
+
+  // list jobs (simple)
+  const list = document.createElement('div'); app.appendChild(list);
+  try{
+    const r = await fetch(API_BASE+'/api/jobs', { headers: authHeaders() });
+    // Many backends implement list; fallback: try jobs/1
+    const j = await r.json();
+    if(r.ok && Array.isArray(j.items)){
+      list.innerHTML = j.items.map(job=>`<div class="item"><div style="font-weight:700">${escapeHtml(job.title)}</div><div class="small">${escapeHtml(job.description||'')}</div><div style="margin-top:8px"><button data-id="${job.id}" class="match">Match</button> <a href="#/candidate/${job.id}">View</a></div></div>`).join('');
+    }else{
+      // try GET /api/jobs/:id
+      list.innerHTML = '<div class="small muted">No jobs list endpoint or unexpected response. Please check backend.</div>';
+    }
+  }catch(e){ list.innerHTML = 'Network: '+e.message; }
+
+  list.addEventListener('click', async (ev)=>{
+    if(ev.target.classList.contains('match')){
+      const id = ev.target.dataset.id; const top_n=5;
+      try{
+        const r = await fetch(API_BASE+'/api/jobs/'+id+'/match',{method:'POST',headers:Object.assign({'Content-Type':'application/json'}, authHeaders()),body:JSON.stringify({top_n})});
+        const j = await r.json(); if(r.ok){ alert(JSON.stringify(j)); } else alert(JSON.stringify(j));
+      }catch(e){ alert('Network: '+e.message); }
+    }
+  });
+}
+
+/* ----------------- Candidates Listing ------------------ */
+async function renderCandidates(){
+  navHighlight('/candidates'); app.innerHTML='';
+  const h = document.createElement('h3'); h.textContent='Candidates (resumes)'; app.appendChild(h);
+  app.appendChild(authPanel()); app.appendChild(document.createElement('hr'));
+  const list = document.createElement('div'); app.appendChild(list);
+  const limit=10, offset=0;
+  try{
+    const r = await fetch(API_BASE+`/api/resumes?limit=${limit}&offset=${offset}`, { headers: authHeaders() });
+    const j = await r.json();
+    if(r.ok && j.items){
+      list.innerHTML = j.items.map(it=>`<div class="item"><div style="font-weight:700">${escapeHtml(it.filename || it.id)}</div><div class="small">Uploaded: ${fmtDate(it.parsed_at)}</div><div style="margin-top:8px"><a href="#/candidate/${it.id}">View</a></div></div>`).join('');
+      const more = document.createElement('div'); more.style.marginTop='12px'; more.className='small muted'; more.textContent = j.next_offset ? 'More results available' : 'End'; app.appendChild(more);
+    }else list.innerHTML = '<div class="small muted">No resumes found (or backend returned unexpected format)</div>';
+  }catch(e){ list.innerHTML = 'Network: '+e.message; }
+}
+
+/* ----------------- Candidate Detail ------------------ */
+async function renderCandidate(id){
+  navHighlight('/candidates'); app.innerHTML='';
+  const h = document.createElement('h3'); h.textContent='Candidate / Resume'; app.appendChild(h);
+  app.appendChild(authPanel()); app.appendChild(document.createElement('hr'));
+  const box = document.createElement('div'); box.className='card'; app.appendChild(box);
+  try{
+    const r = await fetch(API_BASE+`/api/resumes/${id}`, { headers: authHeaders() });
+    const j = await r.json();
+    if(!r.ok){ box.innerHTML = '<pre>'+JSON.stringify(j,null,2)+'</pre>'; return; }
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center"><div><strong>${escapeHtml(j.filename||j.id)}</strong><div class="small">Owner: ${j.owner_id || 'unknown'}</div></div><div><button id="redactToggle">Toggle PII</button></div></div>
+      <div style="margin-top:12px"><pre id="text">${escapeHtml(j.text || '')}</pre></div>
+    `;
+    const btn = document.getElementById('redactToggle'); btn.onclick = ()=>{
+      // refetch with recruiter token? Here simply toggle display if redacted is available
+      if(j._redacted_text){ document.getElementById('text').textContent = document.getElementById('text').textContent === j.text ? j._redacted_text : j.text; }
+      else alert('Backend did not provide redacted text.');
+    };
+  }catch(e){ box.innerHTML = 'Network: '+e.message; }
+}
+
+/* ----------------- Utilities ------------------ */
+function escapeHtml(s){ if(!s) return ''; return s.replace(/[&<>\"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;" })[c]); }
+
+window.addEventListener('hashchange', render);
+render();
+
+</script>
+</body>
+</html>
